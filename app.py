@@ -5,11 +5,17 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader
 
-# Pull API key directly from Streamlit Secrets
-api_key = st.secrets.get("GEMINI_API_KEY")
-client = genai.Client(api_key=api_key)
-
 st.set_page_config(page_title="AI Mock Test Generator", layout="centered")
+
+# 1. API Key Validation
+api_key = st.secrets.get("GEMINI_API_KEY")
+if not api_key or "your_actual" in api_key:
+    st.error(
+        "⚠️️ **Missing API Key**: Add your real Gemini API key in Streamlit Cloud under **App Settings ➔ Secrets** as `GEMINI_API_KEY = \"AIzaSy...\"`"
+    )
+    st.stop()
+
+client = genai.Client(api_key=api_key)
 
 
 def extract_text_from_pdf(uploaded_file):
@@ -19,35 +25,51 @@ def extract_text_from_pdf(uploaded_file):
         extracted = page.extract_text()
         if extracted:
             text += extracted + "\n"
-    return text
+    return text.strip()
 
 
-def parse_questions_with_ai(raw_text):
-    prompt = f"""
-    Extract all multiple-choice questions from the following text into valid JSON.
-    Format requirements:
-    Return an array of objects where each object has:
+def parse_questions_with_ai(uploaded_file, raw_text):
+    prompt = """
+    Extract all multiple-choice questions from the provided document into a JSON array.
+    Each element must be an object with these exact keys:
     - "id": integer
     - "question": string
-    - "options": list of 4 strings (e.g. ["A) Option 1", "B) Option 2", ...])
+    - "options": list of 4 option strings (e.g. ["A) Option 1", "B) Option 2", "C) Option 3", "D) Option 4"])
     - "correct_answer": string matching the exact option text
-    - "explanation": clear, detailed step-by-step reasoning or rectification
-
-    Text:
-    {raw_text[:15000]}
+    - "explanation": detailed step-by-step reasoning or rectification
     """
 
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        ),
-    )
-    return json.loads(response.text)
+    try:
+        # If pypdf extracted text, use text-based processing
+        if len(raw_text) > 50:
+            contents = [prompt, f"Document Text:\n{raw_text[:20000]}"]
+        else:
+            # Fallback for scanned PDFs: pass the raw PDF file directly to Gemini
+            uploaded_file.seek(0)
+            pdf_bytes = uploaded_file.read()
+            contents = [
+                types.Part.from_bytes(
+                    data=pdf_bytes, mime_type="application/pdf"
+                ),
+                prompt,
+            ]
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            ),
+        )
+
+        return json.loads(response.text)
+
+    except Exception as e:
+        st.error(f"❌ **API Error Details**: {str(e)}")
+        return None
 
 
-# Initialize Session State
+# Session State Initialization
 if "quiz_data" not in st.session_state:
     st.session_state.quiz_data = None
 if "user_answers" not in st.session_state:
@@ -65,27 +87,25 @@ if not st.session_state.quiz_data:
         "Upload Question Paper (PDF)", type=["pdf"]
     )
     if uploaded_file and st.button("Generate Test"):
-        with st.spinner("Extracting questions and formatting test..."):
-            raw_text = extract_text_from_pdf(uploaded_file)
-            st.session_state.quiz_data = parse_questions_with_ai(raw_text)
-            st.session_state.start_time = time.time()
-            st.rerun()
+        with st.spinner("Processing questions with Gemini..."):
+            extracted_text = extract_text_from_pdf(uploaded_file)
+            result = parse_questions_with_ai(uploaded_file, extracted_text)
+
+            if result:
+                st.session_state.quiz_data = result
+                st.session_state.start_time = time.time()
+                st.rerun()
 
 # Screen 2: Test Interface
 elif st.session_state.quiz_data and not st.session_state.submitted:
-    # 60-Minute Timer Logic
     elapsed = int(time.time() - st.session_state.start_time)
     remaining = max(0, 3600 - elapsed)
     mins, secs = divmod(remaining, 60)
 
-    st.sidebar.metric(
-        "Time Remaining",
-        f"{mins:02d}:{secs:02d}",
-        delta=None if remaining > 300 else "-Low Time",
-    )
+    st.sidebar.metric("Time Remaining", f"{mins:02d}:{secs:02d}")
 
     if remaining == 0:
-        st.warning("Time has expired! Submitting your test automatically.")
+        st.warning("Time has expired! Submitting test.")
         st.session_state.submitted = True
         st.rerun()
 
@@ -102,24 +122,20 @@ elif st.session_state.quiz_data and not st.session_state.submitted:
             )
             st.write("---")
 
-        submit_btn = st.form_submit_button("Submit Test")
-        if submit_btn:
+        if st.form_submit_button("Submit Test"):
             st.session_state.submitted = True
             st.rerun()
 
-# Screen 3: Results & Detailed Rectifications
+# Screen 3: Results & Explanations
 else:
     st.header("Test Results & Review")
 
-    score = 0
-    total = len(st.session_state.quiz_data)
-
-    for q in st.session_state.quiz_data:
-        user_ans = st.session_state.user_answers.get(q["id"])
-        if user_ans == q["correct_answer"]:
-            score += 1
-
-    st.metric("Final Score", f"{score} / {total}")
+    score = sum(
+        1
+        for q in st.session_state.quiz_data
+        if st.session_state.user_answers.get(q["id"]) == q["correct_answer"]
+    )
+    st.metric("Final Score", f"{score} / {len(st.session_state.quiz_data)}")
 
     st.subheader("Question Breakdown & Explanations")
     for q in st.session_state.quiz_data:
