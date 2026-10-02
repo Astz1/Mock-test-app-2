@@ -5,9 +5,7 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader
 
-# Configure Gemini Client
-# Assumes GEMINI_API_KEY environment variable is set
-# Pull key directly from Streamlit Secrets
+# Pull API key directly from Streamlit Secrets
 api_key = st.secrets.get("GEMINI_API_KEY")
 client = genai.Client(api_key=api_key)
 
@@ -24,14 +22,7 @@ def extract_text_from_pdf(uploaded_file):
     return text
 
 
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",  # 👈 Look at this line
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        ),
-    )
-
+def parse_questions_with_ai(raw_text):
     prompt = f"""
     Extract all multiple-choice questions from the following text into valid JSON.
     Format requirements:
@@ -43,11 +34,11 @@ def extract_text_from_pdf(uploaded_file):
     - "explanation": clear, detailed step-by-step reasoning or rectification
 
     Text:
-    {raw_text[:15000]}  # Truncate if exceptionally large
+    {raw_text[:15000]}
     """
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-2.0-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json"
@@ -70,7 +61,9 @@ st.title("Mock Test Portal")
 
 # Screen 1: File Upload
 if not st.session_state.quiz_data:
-    uploaded_file = st.file_uploader("Upload Question Paper (PDF)", type=["pdf"])
+    uploaded_file = st.file_uploader(
+        "Upload Question Paper (PDF)", type=["pdf"]
+    )
     if uploaded_file and st.button("Generate Test"):
         with st.spinner("Extracting questions and formatting test..."):
             raw_text = extract_text_from_pdf(uploaded_file)
@@ -137,7 +130,9 @@ else:
             f"Q{q['id']}: {'✅ Correct' if is_correct else '❌ Incorrect / Unattempted'}"
         ):
             st.markdown(f"**Question:** {q['question']}")
-            st.write(f"**Your Answer:** {user_ans if user_ans else 'Not attempted'}")
+            st.write(
+                f"**Your Answer:** {user_ans if user_ans else 'Not attempted'}"
+            )
             st.write(f"**Correct Answer:** {q['correct_answer']}")
             st.markdown("---")
             st.markdown(f"**Detailed Rectification:**\n{q['explanation']}")
