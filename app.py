@@ -11,7 +11,6 @@ from pypdf import PdfReader
 api_key = st.secrets.get("GEMINI_API_KEY")
 client = genai.Client(api_key=api_key)
 
-
 st.set_page_config(page_title="AI Mock Test Generator", layout="centered")
 
 
@@ -25,7 +24,14 @@ def extract_text_from_pdf(uploaded_file):
     return text
 
 
-def parse_questions_with_ai(raw_text):
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",  # 👈 Look at this line
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json"
+        ),
+    )
+
     prompt = f"""
     Extract all multiple-choice questions from the following text into valid JSON.
     Format requirements:
