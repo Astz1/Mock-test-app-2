@@ -7,7 +7,10 @@ from pypdf import PdfReader
 
 # Configure Gemini Client
 # Assumes GEMINI_API_KEY environment variable is set
-client = genai.Client()
+# Pull key directly from Streamlit Secrets
+api_key = st.secrets.get("GEMINI_API_KEY")
+client = genai.Client(api_key=api_key)
+
 
 st.set_page_config(page_title="AI Mock Test Generator", layout="centered")
 
