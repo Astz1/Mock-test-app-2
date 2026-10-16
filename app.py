@@ -106,4 +106,4 @@ if "quiz_data" not in st.session_state:
 if "user_answers" not in st.session_state:
     st.session_state.user_answers = {}
 if "submitted" not in st.session_state:
-    st
+    
