@@ -5,19 +5,26 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader
 
-st.set_page_config(page_title="AI Mock Test Generator", layout="centered")
+# Page Configuration
+st.set_page_config(
+    page_title="AI Mock Test Portal",
+    page_icon="📝",
+    layout="centered",
+)
 
-# 1. API Key Validation
+# 1. API Key Setup
 api_key = st.secrets.get("GEMINI_API_KEY")
 if not api_key or "your_actual" in api_key:
     st.error(
-        "⚠️ **Missing API Key**: Add your real Gemini API key in Streamlit Secrets."
+        "⚠️ **Missing or Invalid API Key**: Please set your Gemini API key in Streamlit under **Settings ➔ Secrets** as:\n\n"
+        '```toml\nGEMINI_API_KEY = "AIzaSy..."\n```'
     )
     st.stop()
 
 client = genai.Client(api_key=api_key)
 
 
+# 2. PDF Text Extraction
 def extract_text_from_pdf(uploaded_file):
     reader = PdfReader(uploaded_file)
     text = ""
@@ -28,19 +35,26 @@ def extract_text_from_pdf(uploaded_file):
     return text.strip()
 
 
+# 3. AI Question Parser with Fallback & Real Error Reporting
 def parse_questions_with_ai(uploaded_file, raw_text):
     prompt = """
-    Extract all multiple-choice questions from the provided document into a JSON array.
-    Each element must be an object with these exact keys:
-    - "id": integer
-    - "question": string
-    - "options": list of 4 option strings (e.g. ["A) Option 1", "B) Option 2", "C) Option 3", "D) Option 4"])
-    - "correct_answer": string matching the exact option text
-    - "explanation": detailed step-by-step reasoning or rectification
+    Extract multiple-choice questions from the provided document into a strict JSON array.
+    Extract up to 20 questions.
+    Return ONLY a valid JSON array. Do not include extra conversational text.
+
+    Schema for each array item:
+    {
+      "id": integer (1, 2, 3...),
+      "question": "question text",
+      "options": ["A) option text", "B) option text", "C) option text", "D) option text"],
+      "correct_answer": "exact matching string of the correct option",
+      "explanation": "detailed step-by-step reasoning or rectification"
+    }
     """
 
+    # Use direct text if available; otherwise send PDF bytes for OCR / scanned pages
     if len(raw_text) > 50:
-        contents = [prompt, f"Document Text:\n{raw_text[:20000]}"]
+        contents = [prompt, f"Document Content:\n{raw_text[:15000]}"]
     else:
         uploaded_file.seek(0)
         pdf_bytes = uploaded_file.read()
@@ -49,125 +63,47 @@ def parse_questions_with_ai(uploaded_file, raw_text):
             prompt,
         ]
 
-    # Automatic fallback models in case of 503 server load
-    fallback_models = [
-        "gemini-2.5-flash",
-        "gemini-1.5-flash",
-        "gemini-2.0-flash",
-    ]
+    # Models to try sequentially
+    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash"]
+    last_error = ""
 
-    for model_name in fallback_models:
-        for attempt in range(2):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json"
-                    ),
-                )
-                return json.loads(response.text)
-            except Exception as e:
-                err_text = str(e)
-                if "503" in err_text or "UNAVAILABLE" in err_text:
-                    time.sleep(2)
-                    continue
-                else:
-                    break
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                ),
+            )
 
-    st.error(
-        "⏳ Google servers are momentarily busy. Please tap 'Generate Test' again in 15 seconds."
-    )
+            # Clean output if wrapped in markdown code blocks
+            clean_text = response.text.strip()
+            if clean_text.startswith("```json"):
+                clean_text = clean_text[7:]
+            elif clean_text.startswith("```"):
+                clean_text = clean_text[3:]
+            if clean_text.endswith("```"):
+                clean_text = clean_text[:-3]
+            clean_text = clean_text.strip()
+
+            parsed = json.loads(clean_text)
+            if isinstance(parsed, list) and len(parsed) > 0:
+                return parsed
+
+        except Exception as e:
+            last_error = str(e)
+            st.warning(f"⚠️ {model_name} notice: {last_error}")
+            time.sleep(1)
+
+    st.error(f"❌ Failed to parse question paper. Error: {last_error}")
     return None
 
 
-# Initialize Session State
+# 4. Initialize Session State
 if "quiz_data" not in st.session_state:
     st.session_state.quiz_data = None
 if "user_answers" not in st.session_state:
     st.session_state.user_answers = {}
 if "submitted" not in st.session_state:
-    st.session_state.submitted = False
-if "start_time" not in st.session_state:
-    st.session_state.start_time = None
-
-st.title("Mock Test Portal")
-
-# Screen 1: File Upload
-if not st.session_state.quiz_data:
-    uploaded_file = st.file_uploader(
-        "Upload Question Paper (PDF)", type=["pdf"]
-    )
-    if uploaded_file and st.button("Generate Test"):
-        with st.spinner("Processing questions with Gemini..."):
-            extracted_text = extract_text_from_pdf(uploaded_file)
-            result = parse_questions_with_ai(uploaded_file, extracted_text)
-
-            if result:
-                st.session_state.quiz_data = result
-                st.session_state.start_time = time.time()
-                st.rerun()
-
-# Screen 2: Test Interface
-elif st.session_state.quiz_data and not st.session_state.submitted:
-    elapsed = int(time.time() - st.session_state.start_time)
-    remaining = max(0, 3600 - elapsed)
-    mins, secs = divmod(remaining, 60)
-
-    st.sidebar.metric("Time Remaining", f"{mins:02d}:{secs:02d}")
-
-    if remaining == 0:
-        st.warning("Time has expired! Submitting test.")
-        st.session_state.submitted = True
-        st.rerun()
-
-    st.subheader("Answer the Questions Below:")
-
-    with st.form("test_form"):
-        for q in st.session_state.quiz_data:
-            st.markdown(f"**Q{q['id']}. {q['question']}**")
-            st.session_state.user_answers[q["id"]] = st.radio(
-                "Select option:",
-                options=q["options"],
-                key=f"q_{q['id']}",
-                index=None,
-            )
-            st.write("---")
-
-        if st.form_submit_button("Submit Test"):
-            st.session_state.submitted = True
-            st.rerun()
-
-# Screen 3: Results & Explanations
-else:
-    st.header("Test Results & Review")
-
-    score = sum(
-        1
-        for q in st.session_state.quiz_data
-        if st.session_state.user_answers.get(q["id"]) == q["correct_answer"]
-    )
-    st.metric("Final Score", f"{score} / {len(st.session_state.quiz_data)}")
-
-    st.subheader("Question Breakdown & Explanations")
-    for q in st.session_state.quiz_data:
-        user_ans = st.session_state.user_answers.get(q["id"])
-        is_correct = user_ans == q["correct_answer"]
-
-        with st.expander(
-            f"Q{q['id']}: {'✅ Correct' if is_correct else '❌ Incorrect / Unattempted'}"
-        ):
-            st.markdown(f"**Question:** {q['question']}")
-            st.write(
-                f"**Your Answer:** {user_ans if user_ans else 'Not attempted'}"
-            )
-            st.write(f"**Correct Answer:** {q['correct_answer']}")
-            st.markdown("---")
-            st.markdown(f"**Detailed Rectification:**\n{q['explanation']}")
-
-    if st.button("Start New Test"):
-        st.session_state.quiz_data = None
-        st.session_state.user_answers = {}
-        st.session_state.submitted = False
-        st.session_state.start_time = None
-        st.rerun()
+    st
