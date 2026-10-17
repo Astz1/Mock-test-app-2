@@ -22,7 +22,42 @@ if not api_key:
 client = Groq(api_key=api_key)
 
 
-# 2. File Text Extractor (Supports both .docx and .pdf)
+# 2. Dynamic Model Selector (Prevents 404 model_not_found errors)
+def get_active_groq_model():
+    try:
+        models_data = client.models.list().data
+        # Exclude audio and moderation guardrail models
+        chat_models = [
+            m.id
+            for m in models_data
+            if "whisper" not in m.id.lower() and "guard" not in m.id.lower()
+        ]
+
+        # Preferred models in priority order
+        preferences = [
+            "llama-3.3",
+            "llama-3.1",
+            "llama-3.2",
+            "llama3",
+            "mixtral",
+            "gemma",
+            "qwen",
+        ]
+
+        for pref in preferences:
+            for mid in chat_models:
+                if pref in mid.lower():
+                    return mid
+
+        if chat_models:
+            return chat_models[0]
+    except Exception:
+        pass
+
+    return "llama3-8b-8192"
+
+
+# 3. File Text Extractor (Supports both .docx and .pdf)
 def extract_text_from_file(uploaded_file):
     text = ""
     filename = uploaded_file.name.lower()
@@ -40,13 +75,16 @@ def extract_text_from_file(uploaded_file):
     return text.strip()
 
 
-# 3. Question Parser via Groq
+# 4. Question Parser via Groq
 def parse_questions_with_ai(raw_text):
     if len(raw_text) < 50:
         st.error(
             "Could not extract sufficient text from this document. If using a PDF, ensure it is not an image-only scan, or convert it via Google Docs to `.docx` first."
         )
         return None
+
+    selected_model = get_active_groq_model()
+    st.info(f"Connected to model: `{selected_model}`")
 
     prompt = f"""
 Extract all multiple-choice questions from the following text into valid JSON.
@@ -68,7 +106,7 @@ Document Text:
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=selected_model,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.2,
@@ -76,7 +114,6 @@ Document Text:
 
         raw_json = response.choices[0].message.content.strip()
 
-        # Clean backticks if model wrapped JSON
         if raw_json.startswith("```json"):
             raw_json = raw_json[7:]
         elif raw_json.startswith("```"):
@@ -93,11 +130,11 @@ Document Text:
             return data
 
     except Exception as e:
-        st.error(f"Failed to generate questions: {str(e)}")
+        st.error(f"Failed to generate questions using `{selected_model}`: {str(e)}")
         return None
 
 
-# 4. Session State Setup
+# 5. Session State Setup
 if "quiz_data" not in st.session_state:
     st.session_state.quiz_data = None
 if "user_answers" not in st.session_state:
