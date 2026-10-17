@@ -1,11 +1,9 @@
 import json
 import time
 import streamlit as st
-from google import genai
-from google.genai import types
+from groq import Groq
 from pypdf import PdfReader
 
-# Page Configuration
 st.set_page_config(
     page_title="AI Mock Test Portal",
     page_icon="📝",
@@ -13,14 +11,14 @@ st.set_page_config(
 )
 
 # 1. API Key Validation
-api_key = st.secrets.get("GEMINI_API_KEY")
+api_key = st.secrets.get("GROQ_API_KEY")
 if not api_key:
     st.error(
-        "Missing GEMINI_API_KEY in Streamlit Secrets. Go to Settings > Secrets to add it."
+        "Missing GROQ_API_KEY in Streamlit Secrets. Go to Settings > Secrets to add it."
     )
     st.stop()
 
-client = genai.Client(api_key=api_key)
+client = Groq(api_key=api_key)
 
 
 # 2. PDF Text Extraction
@@ -34,64 +32,52 @@ def extract_text_from_pdf(uploaded_file):
     return text.strip()
 
 
-# 3. AI Question Parser with Automatic Fallback
-def parse_questions_with_ai(uploaded_file, raw_text):
-    prompt = """
-    Extract multiple-choice questions from the provided document into a strict JSON array.
-    Extract up to 20 questions.
-    Return ONLY a valid JSON array without markdown formatting.
+# 3. AI Question Parser using Groq (Llama 3.3)
+def parse_questions_with_ai(raw_text):
+    if len(raw_text) < 50:
+        st.error(
+            "Could not read text from this PDF. Please ensure it contains selectable text and is not an image-only scan."
+        )
+        return None
 
-    Schema for each item:
-    {
-      "id": 1,
-      "question": "question text",
-      "options": ["A) opt1", "B) opt2", "C) opt3", "D) opt4"],
-      "correct_answer": "exact string matching the correct option",
-      "explanation": "step-by-step reasoning or rectification"
-    }
-    """
+    prompt = f"""
+Extract all multiple-choice questions from the following text into valid JSON.
+Extract up to 20 questions.
 
-    if len(raw_text) > 50:
-        contents = [prompt, f"Document Content:\n{raw_text[:15000]}"]
-    else:
-        uploaded_file.seek(0)
-        pdf_bytes = uploaded_file.read()
-        contents = [
-            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-            prompt,
-        ]
+Return a JSON object with a single key "questions" containing a list of question objects.
+Each question object MUST follow this schema:
+{{
+  "id": 1,
+  "question": "The question prompt text",
+  "options": ["A) Option 1", "B) Option 2", "C) Option 3", "D) Option 4"],
+  "correct_answer": "Exact string matching one of the options",
+  "explanation": "Clear step-by-step reasoning or rectification"
+}}
 
-    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash"]
-    last_error = ""
+Document Text:
+{raw_text[:18000]}
+"""
 
-    for model_name in models_to_try:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json"
-                ),
-            )
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
 
-            clean_text = response.text.strip()
-            if clean_text.startswith("```json"):
-                clean_text = clean_text[7:]
-            elif clean_text.startswith("```"):
-                clean_text = clean_text[3:]
-            if clean_text.endswith("```"):
-                clean_text = clean_text[:-3]
-            clean_text = clean_text.strip()
+        raw_json = response.choices[0].message.content
+        data = json.loads(raw_json)
 
-            parsed = json.loads(clean_text)
-            if isinstance(parsed, list) and len(parsed) > 0:
-                return parsed
-        except Exception as e:
-            last_error = str(e)
-            time.sleep(1)
+        # Handle outputs returned under 'questions' or directly as a list
+        if isinstance(data, dict):
+            return data.get("questions", list(data.values())[0])
+        elif isinstance(data, list):
+            return data
 
-    st.error(f"Failed to generate questions: {last_error}")
-    return None
+    except Exception as e:
+        st.error(f"Failed to generate questions: {str(e)}")
+        return None
 
 
 # 4. Session State Setup
@@ -118,7 +104,7 @@ if not st.session_state.quiz_data:
     if uploaded_file and st.button("Generate Test", type="primary"):
         with st.spinner("Extracting questions and preparing your test..."):
             extracted_text = extract_text_from_pdf(uploaded_file)
-            result = parse_questions_with_ai(uploaded_file, extracted_text)
+            result = parse_questions_with_ai(extracted_text)
 
             if result:
                 st.session_state.quiz_data = result
