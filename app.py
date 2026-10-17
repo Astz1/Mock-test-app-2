@@ -1,8 +1,9 @@
 import json
 import time
-import streamlit as st
+import docx
 from groq import Groq
 from pypdf import PdfReader
+import streamlit as st
 
 st.set_page_config(
     page_title="AI Mock Test Portal",
@@ -10,33 +11,40 @@ st.set_page_config(
     layout="centered",
 )
 
-# 1. API Key Validation
+# 1. API Key Setup
 api_key = st.secrets.get("GROQ_API_KEY")
 if not api_key:
     st.error(
-        "Missing GROQ_API_KEY in Streamlit Secrets. Go to Settings > Secrets to add it."
+        "Missing `GROQ_API_KEY` in Streamlit Secrets. Go to **Settings ➔ Secrets** to add it."
     )
     st.stop()
 
 client = Groq(api_key=api_key)
 
 
-# 2. PDF Text Extraction
-def extract_text_from_pdf(uploaded_file):
-    reader = PdfReader(uploaded_file)
+# 2. File Text Extractor (Supports both .docx and .pdf)
+def extract_text_from_file(uploaded_file):
     text = ""
-    for page in reader.pages:
-        extracted = page.extract_text()
-        if extracted:
-            text += extracted + "\n"
+    filename = uploaded_file.name.lower()
+
+    if filename.endswith(".docx"):
+        doc = docx.Document(uploaded_file)
+        text = "\n".join([p.text for p in doc.paragraphs if p.text])
+    elif filename.endswith(".pdf"):
+        reader = PdfReader(uploaded_file)
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+
     return text.strip()
 
 
-# 3. AI Question Parser using Groq (Llama 3.3)
+# 3. Question Parser via Groq
 def parse_questions_with_ai(raw_text):
     if len(raw_text) < 50:
         st.error(
-            "Could not read text from this PDF. Please ensure it contains selectable text and is not an image-only scan."
+            "Could not extract sufficient text from this document. If using a PDF, ensure it is not an image-only scan, or convert it via Google Docs to `.docx` first."
         )
         return None
 
@@ -45,7 +53,7 @@ Extract all multiple-choice questions from the following text into valid JSON.
 Extract up to 20 questions.
 
 Return a JSON object with a single key "questions" containing a list of question objects.
-Each question object MUST follow this schema:
+Each question object MUST strictly follow this schema:
 {{
   "id": 1,
   "question": "The question prompt text",
@@ -59,17 +67,26 @@ Document Text:
 """
 
     try:
-                response = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.2,
         )
 
-        raw_json = response.choices[0].message.content
+        raw_json = response.choices[0].message.content.strip()
+
+        # Clean backticks if model wrapped JSON
+        if raw_json.startswith("```json"):
+            raw_json = raw_json[7:]
+        elif raw_json.startswith("```"):
+            raw_json = raw_json[3:]
+        if raw_json.endswith("```"):
+            raw_json = raw_json[:-3]
+        raw_json = raw_json.strip()
+
         data = json.loads(raw_json)
 
-        # Handle outputs returned under 'questions' or directly as a list
         if isinstance(data, dict):
             return data.get("questions", list(data.values())[0])
         elif isinstance(data, list):
@@ -92,18 +109,18 @@ if "start_time" not in st.session_state:
 
 st.title("📝 AI Mock Test Portal")
 
-# Screen 1: File Upload & Generation
+# Screen 1: Upload and Generation
 if not st.session_state.quiz_data:
     st.write(
-        "Upload any multiple-choice question paper (PDF) to start a 60-minute mock test."
+        "Upload a question paper in **PDF** or **DOCX** format to start a 60-minute mock test."
     )
     uploaded_file = st.file_uploader(
-        "Upload Question Paper (PDF)", type=["pdf"]
+        "Upload Question Paper", type=["pdf", "docx"]
     )
 
     if uploaded_file and st.button("Generate Test", type="primary"):
         with st.spinner("Extracting questions and preparing your test..."):
-            extracted_text = extract_text_from_pdf(uploaded_file)
+            extracted_text = extract_text_from_file(uploaded_file)
             result = parse_questions_with_ai(extracted_text)
 
             if result:
@@ -122,7 +139,7 @@ elif st.session_state.quiz_data and not st.session_state.submitted:
     st.metric("⏳ Time Remaining", f"{mins:02d}:{secs:02d}")
 
     if remaining == 0:
-        st.warning("⏰ Time has expired! Automatically submitting your test.")
+        st.warning("⏰ Time has expired! Submitting test automatically.")
         st.session_state.submitted = True
         st.rerun()
 
@@ -156,7 +173,7 @@ elif st.session_state.quiz_data and not st.session_state.submitted:
             st.session_state.submitted = True
             st.rerun()
 
-# Screen 3: Results & Detailed Review
+# Screen 3: Results and Solutions Breakdown
 else:
     st.header("📊 Test Results & Review")
 
